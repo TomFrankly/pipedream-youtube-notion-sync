@@ -1,21 +1,21 @@
 import { Client } from "@notionhq/client";
 import Bottleneck from "bottleneck";
 import retry from "async-retry";
-import youtubeDataApi from "@pipedream/youtube_data_api"
+import youtubeDataApi from "@pipedream/youtube_data_api";
 
 export default {
 	name: "YouTube to Notion – View Counts",
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.1.4",
+	version: "0.2.6",
 	type: "action",
 	props: {
 		notion: {
 			type: "app",
 			app: "notion",
 		},
-        youtubeDataApi,
+		youtubeDataApi,
 		databaseID: {
 			type: "string",
 			label: "Content Database",
@@ -160,6 +160,13 @@ export default {
 				options: numberProps.map((prop) => ({ label: prop, value: prop })),
 				optional: true,
 			},
+			publishDate: {
+				type: "string",
+				label: "Publish Date",
+				description: "If you want to automatically update your publish dates so they are accurate, select your Publish Date property. Otherwise, leave it blank.",
+				options: dateProps.map((prop) => ({ label: prop, value: prop })),
+				optional: true,
+			},
 			setThumbnail: {
 				type: "boolean",
 				label: "Set Thumbnail?",
@@ -170,7 +177,7 @@ export default {
 			},
 		};
 
-        return props;
+		return props;
 	},
 	methods: {
 		async fetchVidsFromNotion(notion) {
@@ -284,89 +291,197 @@ export default {
 
 			return rows.flat();
 		},
-        getVideoId(url) {
-            const videoIdRegex = /(?:youtube(?:-nocookie)?\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|vi|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
-            const match = url.match(videoIdRegex);
-            return match ? match[1] : null;
-        },
-        buildVideoArray(rows) {
-            const fullVideoArray = rows.map((row) => {
-                const url = row.properties[this.videoURL].url;
-                const videoId = this.getVideoId(url);
-                return {
-                    id: row.id,
-                    videoId: videoId,
-                    url: url,
-                }
-            })
+		getVideoId(url) {
+			const videoIdRegex =
+				/(?:youtube(?:-nocookie)?\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|vi|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+			const match = url.match(videoIdRegex);
+			return match ? match[1] : null;
+		},
+		buildVideoArray(rows) {
+			const fullVideoArray = rows.map((row) => {
+				const url = row.properties[this.videoURL].url;
+				const videoId = this.getVideoId(url);
+				return {
+					id: row.id,
+					videoId: videoId,
+					url: url,
+				};
+			});
 
-            // Split the returned array into chunks of 50 videos
-            const chunkedVideoArray = fullVideoArray.reduce((resultArray, item, index) => {
-                const chunkIndex = Math.floor(index / 50)
-                if (!resultArray[chunkIndex]) {
-                    resultArray[chunkIndex] = []
-                }
-                resultArray[chunkIndex].push(item)
-                return resultArray
-            }, [])
+			// Split the returned array into chunks of 50 videos
+			const chunkedVideoArray = fullVideoArray.reduce(
+				(resultArray, item, index) => {
+					const chunkIndex = Math.floor(index / 50);
+					if (!resultArray[chunkIndex]) {
+						resultArray[chunkIndex] = [];
+					}
+					resultArray[chunkIndex].push(item);
+					return resultArray;
+				},
+				[]
+			);
 
-            return chunkedVideoArray;
-            
-        },
-        async fetchVideosFromYouTube(chunkedRows) {
-            const videoData = await Promise.all(chunkedRows.map(async (chunk) => {
-                const videoIds = chunk.map((video) => video.videoId);
-                return await this.youtubeDataApi.listVideos({
-                    part: ["statistics", "snippet"],
-                    id: videoIds,
-                });
-            }));
-            return videoData.flat();
-        },
-        async updateNotionPage(notion, pageId, props) {
-            // await notion.pages.update({
-            //     page_id: pageId,
-            //     properties: props,
-            // });
-        }
+			return chunkedVideoArray;
+		},
+		async fetchVideosFromYouTube(chunkedRows) {
+			const videoData = await Promise.all(
+				chunkedRows.map(async (chunk) => {
+					const videoIds = chunk.map((video) => video.videoId);
+					return await this.youtubeDataApi.listVideos({
+						part: ["statistics", "snippet"],
+						id: videoIds,
+					});
+				})
+			);
+
+			const videos = videoData.map((video) => video.data.items).flat();
+
+			return videos;
+		},
+		buildUpdateArray(rows, videoData) {
+
+			const videoIdSet = new Set(videoData.map((video) => video.id));
+			const filteredRows = rows.filter((row) => videoIdSet.has(row.videoId))
+
+			console.log("Filtered rows:");
+			console.dir(filteredRows, { depth: null });
+
+			const updatedRows = filteredRows.map((row) => {
+				const video = videoData.find((video) => video.id.includes(row.videoId));
+				return {
+					id: row.id,
+					videoId: row.videoId,
+					url: row.url,
+					views: parseInt(video.statistics.viewCount),
+					likes: parseInt(video.statistics.likeCount),
+					comments: parseInt(video.statistics.commentCount),
+					publish: video.snippet.publishedAt,
+					ytTitle: video.snippet.title,
+					thumbnail: video.snippet.thumbnails.maxres.url,
+				};
+			});
+			return updatedRows;
+		},
+		async updateNotionPage(notion, updatedRows) {
+			// Set up our Bottleneck limiter
+			const limiter = new Bottleneck({
+				minTime: 333,
+				maxConcurrent: 1,
+			});
+
+			// Handle 429 errors
+			limiter.on("error", (error, jobInfo) => {
+				const isRateLimitError = error.statusCode === 429;
+				if (isRateLimitError) {
+					console.log(
+						`Job ${jobInfo.options.id} failed due to rate limit: ${error}`
+					);
+					const waitTime = error.headers["retry-after"]
+						? parseInt(error.headers["retry-after"], 10)
+						: 0.4;
+					console.log(`Retrying after ${waitTime} seconds...`);
+					return waitTime * 1000;
+				}
+
+				console.log(`Job ${jobInfo.options.id} failed: ${error}`);
+				// Don't retry via limiter if it's not a 429
+				return;
+			});
+
+			const updater = async (row) => {
+				return retry(
+					async (bail) => {
+						try {
+							const props = {
+								[this.viewCount]: {
+									number: row.views,
+								},
+								...(this.likeCount && {
+									[this.likeCount]: {
+										number: row.likes,
+									},
+								}),
+								...(this.commentCount && {
+									[this.commentCount]: {
+										number: row.comments,
+									},
+								}),
+								...(this.publishDate && {
+									[this.publishDate]: {
+										date: {
+											start: row.publish,
+										},
+									},
+								}),
+							};
+
+							const cover = {
+								type: "external",
+								external: {
+									url: row.thumbnail,
+								},
+							};
+
+							await notion.pages.update({
+								page_id: row.id,
+								properties: props,
+								...(this.setThumbnail === true && {
+									cover: cover,
+								}),
+							});
+
+							return row.id;
+						} catch (error) {
+							if (400 <= error.status && error.status <= 409) {
+								// Don't retry for errors 400-409
+								bail(error);
+								return;
+							}
+						}
+					},
+					{
+						retries: 2,
+						onRetry: (error, attempt) => {
+							console.log(
+								`Attempt ${attempt} failed with error message ${error}. Retrying...`
+							);
+						},
+					}
+				);
+			};
+
+			const updatedNotionPages = await Promise.all(
+				updatedRows.map((row) => limiter.schedule(() => updater(row)))
+			);
+
+			return updatedNotionPages;
+		},
 	},
 	async run({ steps, $ }) {
 		const notion = new Client({ auth: this.notion.$auth.oauth_access_token });
 
 		const rows = await this.fetchVidsFromNotion(notion);
+		console.log("Rows from Notion:" + rows.length);
+		console.dir(rows, { depth: null });
 
 		const chunkedRows = this.buildVideoArray(rows);
-        console.dir(chunkedRows, {depth: null});
+		console.log("Chunked rows:" + chunkedRows.length);
+		console.dir(chunkedRows, { depth: null });
 
-        const videoData = await this.fetchVideosFromYouTube(chunkedRows);
-        console.dir(videoData, {depth: null});
+		const videoData = await this.fetchVideosFromYouTube(chunkedRows);
+		console.log("Video data:" + videoData.length);
+		console.dir(videoData, { depth: null });
 
-        // Copilot, wrong
-        // const updatedNotionPages = await Promise.all(videoData.map(async (video) => {
-        //     const pageId = rows.find((row) => row.properties[this.videoURL].url.includes(video.id)).id;
-        //     const props = {
-        //         [this.viewCount]: {
-        //             number: video.statistics.viewCount,
-        //         },
-        //         [this.likeCount]: {
-        //             number: video.statistics.likeCount,
-        //         },
-        //         [this.commentCount]: {
-        //             number: video.statistics.commentCount,
-        //         },
-        //     };
-        //     if (this.setThumbnail) {
-        //         props["cover"] = {
-        //             type: "external",
-        //             external: {
-        //                 url: video.snippet.thumbnails.maxres.url,
-        //             },
-        //         };
-        //     }
-        //     await this.updateNotionPage(notion, pageId, props);
-        //     return pageId;
-        // }))
+		// Add the view count, like count, comment count, and maxrres thumbnail URL to each object in chunkedRows
+		const updatedRows = this.buildUpdateArray(chunkedRows.flat(), videoData);
+		console.log("Updated rows:"	+ updatedRows.length);
+		console.dir(updatedRows, { depth: null });
 
-        return updatedNotionPages;
+		// Update the pages in Notion
+		const updatedNotionPages = await this.updateNotionPage(notion, updatedRows);
+		console.log("Updated Notion pages:" + updatedNotionPages.length);
+		console.dir(updatedNotionPages, { depth: null });
+
+		return updatedNotionPages;
 	},
 };
