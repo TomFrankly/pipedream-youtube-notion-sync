@@ -8,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.6",
+	version: "0.2.7",
 	type: "action",
 	props: {
 		notion: {
@@ -163,7 +163,8 @@ export default {
 			publishDate: {
 				type: "string",
 				label: "Publish Date",
-				description: "If you want to automatically update your publish dates so they are accurate, select your Publish Date property. Otherwise, leave it blank.",
+				description:
+					"If you want to automatically update your publish dates so they are accurate, select your Publish Date property. Otherwise, leave it blank.",
 				options: dateProps.map((prop) => ({ label: prop, value: prop })),
 				optional: true,
 			},
@@ -292,8 +293,13 @@ export default {
 			return rows.flat();
 		},
 		getVideoId(url) {
-			const videoIdRegex =
-				/(?:youtube(?:-nocookie)?\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|vi|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+			let videoIdRegex;
+			if (url.includes("shorts")) {
+				videoIdRegex = /shorts\/(.{11})/;
+			} else {
+				videoIdRegex =
+					/(?:youtube(?:-nocookie)?\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|vi|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+			}
 			const match = url.match(videoIdRegex);
 			return match ? match[1] : null;
 		},
@@ -339,9 +345,8 @@ export default {
 			return videos;
 		},
 		buildUpdateArray(rows, videoData) {
-
 			const videoIdSet = new Set(videoData.map((video) => video.id));
-			const filteredRows = rows.filter((row) => videoIdSet.has(row.videoId))
+			const filteredRows = rows.filter((row) => videoIdSet.has(row.videoId));
 
 			console.log("Filtered rows:");
 			console.dir(filteredRows, { depth: null });
@@ -474,7 +479,7 @@ export default {
 
 		// Add the view count, like count, comment count, and maxrres thumbnail URL to each object in chunkedRows
 		const updatedRows = this.buildUpdateArray(chunkedRows.flat(), videoData);
-		console.log("Updated rows:"	+ updatedRows.length);
+		console.log("Updated rows:" + updatedRows.length);
 		console.dir(updatedRows, { depth: null });
 
 		// Update the pages in Notion
