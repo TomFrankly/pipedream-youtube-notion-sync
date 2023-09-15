@@ -1,3 +1,10 @@
+/** 
+ * To Do:
+ * - Implemnet an opt-in email update feature
+ * - Each time the script runs, it checks it version against the one in my Github
+ * - If it's lower, email the user letting them know there's a new version
+ */
+
 import { Client } from "@notionhq/client";
 import Bottleneck from "bottleneck";
 import retry from "async-retry";
