@@ -1,10 +1,3 @@
-/** 
- * To Do:
- * - Implemnet an opt-in email update feature
- * - Each time the script runs, it checks it version against the one in my Github
- * - If it's lower, email the user letting them know there's a new version
- */
-
 import { Client } from "@notionhq/client";
 import Bottleneck from "bottleneck";
 import retry from "async-retry";
@@ -15,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.7",
+	version: "0.2.8",
 	type: "action",
 	props: {
 		notion: {
@@ -112,7 +105,8 @@ export default {
 		const properties = database.properties;
 
 		const titleProps = Object.keys(properties).filter(
-			(k) => properties[k].type === "title"
+			(k) =>
+				properties[k].type === "title" || properties[k].type === "rich_text"
 		);
 
 		const numberProps = Object.keys(properties).filter(
@@ -132,13 +126,6 @@ export default {
 		);
 
 		const props = {
-			videoTitle: {
-				type: "string",
-				label: "Video Title (Required)",
-				description: "Select the title property for your videos.",
-				options: titleProps.map((prop) => ({ label: prop, value: prop })),
-				optional: false,
-			},
 			videoURL: {
 				type: "string",
 				label: "URL",
@@ -183,15 +170,54 @@ export default {
 				default: false,
 				optional: true,
 			},
+			videoTitle: {
+				type: "string",
+				label: "Video Title (Required)",
+				description:
+					"Select the title property for your videos. This propety supports both Title and Rich Text types, which means you can choose to update your actual page title in Notion, or use a separate Rich Text property to store your live video titles from YouTube.",
+				options: titleProps.map((prop) => ({
+					label: prop,
+					value: JSON.stringify({
+						name: prop,
+						id: properties[prop].id,
+						type: properties[prop].type,
+					}),
+				})),
+				optional: true,
+				reloadProps: true,
+			},
+			...(this.videoTitle && {
+				updateTitle: {
+					type: "boolean",
+					label: "Update Title?",
+					description:
+						"If set to True, this script will automatically update your chosen Video Title property to the video's title.",
+					default: false,
+					optional: true,
+				},
+			}),
 		};
 
 		return props;
 	},
 	methods: {
+		/**
+		 * Fetches pages from the chosen Notion database, filtering for pages with YouTube URLs.
+		 *
+		 * @param {import('@notionhq/client').Client} notion
+		 * @returns {Promise<Array<Object>>} - An array of objects, each containing the full page object response from the Notion API.
+		 * @throws {Error} - Throws an error if the query fails.
+		 *
+		 * @example
+		 * await this.fetchVidsFromNotion(notion)
+		 * // Returns an array of page objects, each with the structure shown in the 200 response example here: https://developers.notion.com/reference/retrieve-a-page
+		 */
 		async fetchVidsFromNotion(notion) {
 			// Pagination variables
-			let hasMore = undefined;
-			let token = undefined;
+			/** @type {boolean|undefined} */
+			let hasMore;
+			/** @type {string|undefined} */
+			let token;
 
 			// Set up our Bottleneck limiter
 			const limiter = new Bottleneck({
@@ -199,10 +225,14 @@ export default {
 				maxConcurrent: 1,
 			});
 
-			// Handle 429 errors
-			limiter.on("error", (error) => {
-				const isRateLimitError = error.statusCode === 429;
-				if (isRateLimitError) {
+			/**
+			 * Handles rate limit errors by retrying after the specified wait time defined in the error headers.
+			 *
+			 * @param {Error} error - The error object returned by the API.
+			 * @returns {number|undefined} - The wait time in milliseconds if the error is a rate limit error, otherwise undefined.
+			 */
+			const handleRateLimitError = (error) => {
+				if (error.statusCode === 429) {
 					console.log(
 						`Job ${jobInfo.options.id} failed due to rate limit: ${error}`
 					);
@@ -214,12 +244,14 @@ export default {
 				}
 
 				console.log(`Job ${jobInfo.options.id} failed: ${error}`);
-				// Don't retry via limiter if it's not a 429
 				return;
-			});
+			};
+
+			limiter.on("error", handleRateLimitError);
 
 			// Initial array for arrays of User or Project objects
-			let rows = [];
+			/** @type {Array<Object>} */
+			const rows = [];
 
 			// Query the Notion API until hasMore == false. Add all results to the rows array
 			while (hasMore == undefined || hasMore == true) {
@@ -257,7 +289,7 @@ export default {
 								resp = await limiter.schedule(() =>
 									notion.databases.query(params)
 								);
-								rows.push(resp.results);
+								rows.push(...resp.results);
 
 								hasMore = resp.has_more;
 								if (resp.next_cursor) {
@@ -297,8 +329,23 @@ export default {
 				}
 			}
 
-			return rows.flat();
+			return rows;
 		},
+		/**
+		 * Extracts the video ID from the provided YouTube URL.
+		 * Supports both standard YouTube URLs and YouTube Shorts URLs.
+		 *
+		 * @param {string} url - The YouTube URL to extract the video ID from.
+		 * @returns {string|null} - The video ID extracted from the URL, or null if no ID is found.
+		 *
+		 * @example
+		 * this.getVideoId("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+		 * // Returns "dQw4w9WgXcQ"
+		 *
+		 * @example
+		 * this.getVideoId("https://www.youtube.com/shorts/kV626LjZ2xs")
+		 * // Returns "kV626LjZ2xs"
+		 */
 		getVideoId(url) {
 			let videoIdRegex;
 			if (url.includes("shorts")) {
@@ -308,72 +355,235 @@ export default {
 					/(?:youtube(?:-nocookie)?\.com\/(?:[^/\n\s]+\/\S+\/|(?:v|vi|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
 			}
 			const match = url.match(videoIdRegex);
+			if (!match) {
+				console.warn(`No video ID found for URL: ${url}`);
+			}
 			return match ? match[1] : null;
 		},
+		/**
+		 * Creates a multi-dimensional array of video objects from the provided array of Notion pages.
+		 * Each sub-array contains up to 50 video objects in order to comply with the YouTube Data API's limits.
+		 *
+		 * @param {Array<Object>} rows - An array of Notion page objects, each containing the full page object response from the Notion API.
+		 * @returns {Array<Array<Object>>} - A multi-dimensional array of video objects, each containing the video ID and URL.
+		 *
+		 * @example
+		 * this.buildVideoArray(rows)
+		 * // [ [ { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', videoId: 'uvkmvXbEfec', url: 'https://www.youtube.com/watch?v=uvkmvXbEfec' } ] ]
+		 */
 		buildVideoArray(rows) {
-			const fullVideoArray = rows.map((row) => {
-				const url = row.properties[this.videoURL].url;
-				const videoId = this.getVideoId(url);
-				return {
-					id: row.id,
-					videoId: videoId,
-					url: url,
-				};
-			});
+			if (!Array.isArray(rows)) {
+				throw new Error("The provided rows must be an array.");
+			}
+
+			/** Construct an array of simplified objects with the Notion Page ID, YouTube Video ID, and URL.
+			 * Filter out any rows that do not have a valid video URL.
+			 * */
+			const validVideoArray = rows
+				.map((row) => {
+					if (!row.properties || !row.properties[this.videoURL]) {
+						console.warn(`Row ${row.id} does not have a valid video URL.`);
+						return null;
+					}
+					const url = row.properties[this.videoURL].url;
+					const videoId = this.getVideoId(url);
+					return videoId ? { id: row.id, videoId, url } : null;
+				})
+				.filter(Boolean);
 
 			// Split the returned array into chunks of 50 videos
-			const chunkedVideoArray = fullVideoArray.reduce(
-				(resultArray, item, index) => {
-					const chunkIndex = Math.floor(index / 50);
-					if (!resultArray[chunkIndex]) {
-						resultArray[chunkIndex] = [];
-					}
-					resultArray[chunkIndex].push(item);
-					return resultArray;
-				},
-				[]
-			);
+			const chunkedVideoArray = [];
+			for (let i = 0; i < validVideoArray.length; i += 50) {
+				chunkedVideoArray.push(validVideoArray.slice(i, i + 50));
+			}
 
 			return chunkedVideoArray;
 		},
+		/**
+		 * Fetches video data from YouTube Data API for the provided video IDs.
+		 *
+		 * @param {Array<Array<Object>>} chunkedRows - A multi-dimensional array of video objects, each containing the video ID and URL. Each inner array can contain up to 50 video objects.
+		 * @returns {Promise<Array<Object>>} An array of video objects from the YouTube Data API, each containing the video's statistics and snippet data.
+		 * @throws {Error} If there's an unrecoverable error when fetching data from YouTube API.
+		 *
+		 * @example
+		 * await this.fetchVideosFromYouTube(chunkedRows)
+		 *
+		 * @see {@link https://developers.google.com/youtube/v3/docs/videos/list#response|YouTube Data API Response}
+		 */
 		async fetchVideosFromYouTube(chunkedRows) {
 			const videoData = await Promise.all(
 				chunkedRows.map(async (chunk) => {
 					const videoIds = chunk.map((video) => video.videoId);
-					return await this.youtubeDataApi.listVideos({
-						part: ["statistics", "snippet"],
-						id: videoIds,
-					});
+
+					return retry(
+						async (bail) => {
+							try {
+								const response = await this.youtubeDataApi.listVideos({
+									part: ["statistics", "snippet"],
+									id: videoIds,
+								});
+								return response;
+							} catch (error) {
+								if (error.code === 400) {
+									console.error("Bad request error:", error.message);
+									bail(new Error(`Bad request: ${error.message}`));
+								} else if (error.code === 403) {
+									console.error("Forbidden error:", error.message);
+									bail(new Error(`Forbidden: ${error.message}`));
+								} else if (error.code === 404) {
+									console.warn("Video not found:", error.message);
+									return { data: { items: [] } }; // Return empty array for not found videos
+								} else if (error.code >= 500) {
+									console.warn(`Server error (${error.code}):`, error.message);
+									throw error; // Retry on server errors
+								} else {
+									console.error("Unknown error:", error);
+									bail(new Error(`Unknown error: ${error.message}`));
+								}
+							}
+						},
+						{
+							retries: 3,
+							factor: 2,
+							minTimeout: 1000,
+							maxTimeout: 5000,
+							onRetry: (error, attempt) => {
+								console.log(`Attempt ${attempt} failed. Retrying...`);
+							},
+						}
+					);
 				})
 			);
 
-			const videos = videoData.map((video) => video.data.items).flat();
+			const videos = videoData
+				.filter(
+					(response) =>
+						response && response.data && Array.isArray(response.data.items)
+				)
+				.map((response) => response.data.items)
+				.flat();
 
 			return videos;
 		},
+		/**
+		 * @typedef {Object} Thumbnail
+		 * @property {string} url - The URL of the thumbnail image.
+		 * @property {number} width - The width of the thumbnail in pixels.
+		 * @property {number} height - The height of the thumbnail in pixels.
+		 */
+
+		/**
+		 * Retrieves the URL of the highest resolution thumbnail available.
+		 *
+		 * @param {Object} thumbnails - An object containing thumbnail data at various resolutions. May include any of: maxres, standard, high, medium, default.
+		 * @param {Thumbnail} [thumbnails.maxres] - Maximum resolution thumbnail.
+		 * @param {Thumbnail} [thumbnails.standard] - Standard resolution thumbnail.
+		 * @param {Thumbnail} [thumbnails.high] - High resolution thumbnail.
+		 * @param {Thumbnail} [thumbnails.medium] - Medium resolution thumbnail.
+		 * @param {Thumbnail} [thumbnails.default] - Default (lowest) resolution thumbnail.
+		 *
+		 * @param {string} title - The title of the video, used for logging if no thumbnail is found.
+		 *
+		 * @returns {string|null} The URL of the highest resolution thumbnail available, or null if no thumbnail is found.
+		 *
+		 * @example
+		 * const thumbnails = {
+		 *   default: { url: "https://example.com/default.jpg", width: 120, height: 90 },
+		 *   medium: { url: "https://example.com/medium.jpg", width: 320, height: 180 },
+		 *   high: { url: "https://example.com/high.jpg", width: 480, height: 360 },
+		 *   standard: { url: "https://example.com/standard.jpg", width: 640, height: 480 },
+		 *   maxres: { url: "https://example.com/maxres.jpg", width: 1280, height: 720 }
+		 * };
+		 * const url = this.getThumbnailURL(video.snippet.thumbnails, video.snippet.title);
+		 * // Returns: "https://example.com/maxres.jpg"
+		 */
+		getThumbnailURL(thumbnails, title) {
+			const resolutions = ["maxres", "standard", "high", "medium", "default"];
+
+			for (let resolution of resolutions) {
+				if (thumbnails[resolution] && thumbnails[resolution].url) {
+					return thumbnails[resolution].url;
+				}
+			}
+
+			console.log(`No thumbnail found for video: ${title}`);
+			return null;
+		},
+		/**
+		 * Builds an array of updated objects combining data from Notion rows and YouTube video data.
+		 *
+		 * @param {Array<Object>} rows - The flattened array of simplified objects with the Notion Page ID, YouTube Video ID, and URL.
+		 * @param {Array<Object>} videoData - An array of video objects from the YouTube Data API, each containing the video's statistics and snippet data.
+		 * @returns {Array<Object>} An array of updated objects with the Notion Page ID, YouTube Video ID, URL, view count, like count, comment count, publish date, YouTube title, and thumbnail URL (if found).
+		 *
+		 * @example
+		 * const rows = [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', videoId: 'uvkmvXbEfec', url: 'https://www.youtube.com/watch?v=uvkmvXbEfec' }];
+		 * const videoData = [{ id: 'uvkmvXbEfec', statistics: { viewCount: '56408', likeCount: '1635', commentCount: '60' }, snippet: { publishedAt: '2024-06-03T17:15:22Z', title: '8 New Notion Features You Should Know About!', thumbnails: { ... } } }];
+		 * const result = this.buildUpdateArray(rows, videoData);
+		 * // Result:
+		 * // [{
+		 * //   id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+		 * //   videoId: 'uvkmvXbEfec',
+		 * //   url: 'https://www.youtube.com/watch?v=uvkmvXbEfec',
+		 * //   views: 56408,
+		 * //   likes: 1635,
+		 * //   comments: 60,
+		 * //   publish: '2024-06-03T17:15:22Z',
+		 * //   ytTitle: '8 New Notion Features You Should Know About!',
+		 * //   thumbnail: 'https://i.ytimg.com/vi/uvkmvXbEfec/maxresdefault.jpg'
+		 * // }]
+		 */
 		buildUpdateArray(rows, videoData) {
 			const videoIdSet = new Set(videoData.map((video) => video.id));
 			const filteredRows = rows.filter((row) => videoIdSet.has(row.videoId));
 
-			console.log("Filtered rows:");
+			console.log("Rows:" + rows.length);
+			console.log(
+				"Filtered rows (after checking each page's video ID against the set of video IDs returned by YouTube Data API):" +
+					filteredRows.length
+			);
 			console.dir(filteredRows, { depth: null });
 
-			const updatedRows = filteredRows.map((row) => {
-				const video = videoData.find((video) => video.id.includes(row.videoId));
-				return {
-					id: row.id,
-					videoId: row.videoId,
-					url: row.url,
-					views: parseInt(video.statistics.viewCount),
-					likes: parseInt(video.statistics.likeCount),
-					comments: parseInt(video.statistics.commentCount),
-					publish: video.snippet.publishedAt,
-					ytTitle: video.snippet.title,
-					thumbnail: video.snippet.thumbnails.maxres.url,
-				};
-			});
+			const updatedRows = filteredRows
+				.map((row) => {
+					const video = videoData.find((video) => video.id === row.videoId);
+					if (!video) {
+						console.log(`No video data found for video ID: ${row.videoId}`);
+						return null;
+					}
+					const thumbnailUrl = video.snippet.thumbnails
+						? this.getThumbnailURL(
+								video.snippet.thumbnails,
+								video.snippet.title
+						  )
+						: null;
+					return {
+						id: row.id,
+						videoId: row.videoId,
+						url: row.url,
+						views: parseInt(video.statistics.viewCount, 10) || 0,
+						likes: parseInt(video.statistics.likeCount, 10) || 0,
+						comments: parseInt(video.statistics.commentCount, 10) || 0,
+						publish: video.snippet.publishedAt,
+						ytTitle: video.snippet.title,
+						thumbnail: thumbnailUrl,
+					};
+				})
+				.filter(Boolean);
+
 			return updatedRows;
 		},
+		/**
+		 * Updates the properties of each Notion page with the view count, like count, comment count, and publish date. Also updates the thumbnail, if a thumbnail was found.
+		 *
+		 * @param {import('@notionhq/client').Client} notion
+		 * @param {Array<Object>} updatedRows - An array of updated objects with the Notion Page ID, YouTube Video ID, URL, view count, like count, comment count, publish date, YouTube title, and thumbnail URL (if found).
+		 * @returns {Array<string>} An array of Notion Page IDs that were successfully updated.
+		 *
+		 * @example
+		 * await this.updateNotionPage(notion, updatedRows)
+		 */
 		async updateNotionPage(notion, updatedRows) {
 			// Set up our Bottleneck limiter
 			const limiter = new Bottleneck({
@@ -427,20 +637,37 @@ export default {
 								}),
 							};
 
-							const cover = {
-								type: "external",
-								external: {
-									url: row.thumbnail,
-								},
-							};
-
-							await notion.pages.update({
+							const updateParams = {
 								page_id: row.id,
 								properties: props,
-								...(this.setThumbnail === true && {
-									cover: cover,
-								}),
-							});
+							}
+
+							if (this.videoTitle && this.videoTitle !== "" && this.updateTitle === true) {
+								const titleProp = JSON.parse(this.videoTitle)
+								const title = row.ytTitle
+
+								updateParams.properties[titleProp.name] = {
+									[titleProp.type]: [
+										{
+											type: "text",
+											text: {
+												content: title,
+											},
+										},
+									],
+								}
+							}
+
+							if (this.setThumbnail === true && row.thumbnail) {
+								updateParams.cover = {
+									type: "external",
+									external: {
+										url: row.thumbnail,
+									},
+								}
+							}
+
+							await notion.pages.update(updateParams);
 
 							return row.id;
 						} catch (error) {
@@ -472,24 +699,38 @@ export default {
 	async run({ steps, $ }) {
 		const notion = new Client({ auth: this.notion.$auth.oauth_access_token });
 
+		/* Fetch videos from Notion */
+		console.log(
+			`Fetching all pages from connected Notion database that have a YouTube URL...`
+		);
 		const rows = await this.fetchVidsFromNotion(notion);
-		console.log("Rows from Notion:" + rows.length);
+		console.log("Pages fetched from Notion:" + rows.length);
 		console.dir(rows, { depth: null });
 
+		/* Create arrays of objects with Notion Page ID, YouTube URL, and YouTube ID. Each array can have up to 50 objects to comply with YouTube API limits. Place all arrays into a containing array. */
+		console.log(`Building arrays of video objects...`);
 		const chunkedRows = this.buildVideoArray(rows);
-		console.log("Chunked rows:" + chunkedRows.length);
+		console.log(
+			"Multi-dimensional array of video objects:" + chunkedRows.length
+		);
 		console.dir(chunkedRows, { depth: null });
 
+		/* For each array of video objects, fetch video data from the YouTube Data API */
+		console.log(`Fetching video data from the YouTube Data API...`);
 		const videoData = await this.fetchVideosFromYouTube(chunkedRows);
 		console.log("Video data:" + videoData.length);
 		console.dir(videoData, { depth: null });
 
-		// Add the view count, like count, comment count, and maxrres thumbnail URL to each object in chunkedRows
+		/* Add the view count, like count, comment count, and maxrres thumbnail URL to each object in chunkedRows */
+		console.log(
+			`Filtering out any pages that don't have a valid response from the YouTube Data API, then constructing an updated array of video data...`
+		);
 		const updatedRows = this.buildUpdateArray(chunkedRows.flat(), videoData);
 		console.log("Updated rows:" + updatedRows.length);
 		console.dir(updatedRows, { depth: null });
 
-		// Update the pages in Notion
+		/* Update the pages in Notion */
+		console.log(`Updating Notion pages...`);
 		const updatedNotionPages = await this.updateNotionPage(notion, updatedRows);
 		console.log("Updated Notion pages:" + updatedNotionPages.length);
 		console.dir(updatedNotionPages, { depth: null });
