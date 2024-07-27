@@ -8,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.8",
+	version: "0.2.9",
 	type: "action",
 	props: {
 		notion: {
@@ -196,6 +196,14 @@ export default {
 					optional: true,
 				},
 			}),
+			disableRateBursting: {
+				type: "boolean",
+				label: "Disable Rate Bursting (Advanced",
+				description:
+					"If set to True, this script will disable API rate bursting for the Notion API, and will make no more than 3 requests per second. Set this to True if you are experiencing rate limiting issues.",
+				default: false,
+				optional: true,
+			},
 		};
 
 		return props;
@@ -221,7 +229,7 @@ export default {
 
 			// Set up our Bottleneck limiter
 			const limiter = new Bottleneck({
-				minTime: 333,
+				minTime: this.disableRateBursting === true ? 333 : 50,
 				maxConcurrent: 1,
 			});
 
@@ -587,8 +595,8 @@ export default {
 		async updateNotionPage(notion, updatedRows) {
 			// Set up our Bottleneck limiter
 			const limiter = new Bottleneck({
-				minTime: 333,
-				maxConcurrent: 1,
+				minTime: this.disableRateBursting === true ? 333 : 10,
+				maxConcurrent: this.disableRateBursting === true ? 1 : 20,
 			});
 
 			// Handle 429 errors
@@ -699,6 +707,13 @@ export default {
 	async run({ steps, $ }) {
 		const notion = new Client({ auth: this.notion.$auth.oauth_access_token });
 
+		/* Log rate-bursting status */
+		if (this.disableRateBursting === true) {
+			console.log(`Rate bursting is disabled. Script will update Notion pages using established Notion API rate guidance of 3 requests per second.`)
+		} else {
+			console.log(`Rate bursting is enabled. Script will update Notion pages as fast as possible, and will attempt to retry failed requests using wait-until headers. If you are experiencing rate limiting issues, consider enabling the "Disable Rate Bursting" option.`)
+		}
+		
 		/* Fetch videos from Notion */
 		console.log(
 			`Fetching all pages from connected Notion database that have a YouTube URL...`
