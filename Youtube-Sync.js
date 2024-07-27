@@ -8,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.91",
+	version: "0.2.92",
 	type: "action",
 	props: {
 		notion: {
@@ -172,7 +172,7 @@ export default {
 			},
 			videoTitle: {
 				type: "string",
-				label: "Video Title (Required)",
+				label: "Video Title",
 				description:
 					"Select the title property for your videos. This propety supports both Title and Rich Text types, which means you can choose to update your actual page title in Notion, or use a separate Rich Text property to store your live video titles from YouTube.",
 				options: titleProps.map((prop) => ({
