@@ -8,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.9",
+	version: "0.2.91",
 	type: "action",
 	props: {
 		notion: {
@@ -198,7 +198,7 @@ export default {
 			}),
 			disableRateBursting: {
 				type: "boolean",
-				label: "Disable Rate Bursting (Advanced",
+				label: "Disable Rate Bursting (Advanced)",
 				description:
 					"If set to True, this script will disable API rate bursting for the Notion API, and will make no more than 3 requests per second. Set this to True if you are experiencing rate limiting issues.",
 				default: false,
