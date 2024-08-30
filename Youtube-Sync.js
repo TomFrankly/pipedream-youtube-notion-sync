@@ -306,6 +306,7 @@ export default {
 							} catch (error) {
 								if (400 <= error.status && error.status <= 409) {
 									// Don't retry for errors 400-409
+									console.error(`Encountered error with status ${error.status} while fetching video records from Notion. Cannot retry.`)
 									bail(error);
 									return;
 								}
@@ -316,17 +317,19 @@ export default {
 									error.status === 504
 								) {
 									// Retry on 500, 503, and 504
+									console.error(`Encountered retriable error while attempting to fetch video records from Notion. Retryin...`)
 									throw error;
 								}
 
 								// Don't retry for other errors
+								console.error(`Encountered error while tryin to fetch videos from Notion. Cannot retry.`)
 								bail(error);
 							}
 						},
 						{
 							retries: 2,
 							onRetry: (error, attempt) => {
-								console.log(`Attempt ${attempt} failed. Retrying...`);
+								console.log(`Attempt ${attempt} failed due to ${error}. Retrying...`);
 							},
 						}
 					);
@@ -681,6 +684,7 @@ export default {
 						} catch (error) {
 							if (400 <= error.status && error.status <= 409) {
 								// Don't retry for errors 400-409
+								console.error(`Encountered error with status ${error.status} when attempting to update Notion page ${row.id} for video ${row.ytTitle}. Bailing...`)
 								bail(error);
 								return;
 							}
@@ -690,7 +694,7 @@ export default {
 						retries: 2,
 						onRetry: (error, attempt) => {
 							console.log(
-								`Attempt ${attempt} failed with error message ${error}. Retrying...`
+								`Attempt ${attempt} failed for Notion page ${row.id} for video ${row.ytTitle} with error message ${error}. Retrying...`
 							);
 						},
 					}
