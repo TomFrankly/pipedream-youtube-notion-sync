@@ -1,4 +1,4 @@
-import { Client } from "@notionhq/client";
+import { Client } from "@notionhq/client@4.0.2";
 import Bottleneck from "bottleneck";
 import retry from "async-retry";
 import youtubeDataApi from "@pipedream/youtube_data_api";
@@ -8,7 +8,7 @@ export default {
 	description:
 		"Fetches view, like, and comment counts for each YouTube video in a Notion database. Uses the public YouTube Data API.",
 	key: "youtube-notion-sync-views",
-	version: "0.2.92",
+	version: "0.2.93",
 	type: "action",
 	props: {
 		notion: {
